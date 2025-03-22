@@ -62,6 +62,43 @@ impl SignedOptions<'_> {
     }
 }
 
+/// CloudFront signed policy
+pub struct SignedPolicy {
+    pub policy: String,
+    pub signature: String,
+}
+
+/// Get a CloudFront signed policy
+///
+/// # Arguments
+///
+/// * `url` - A CloudFront URL for which the cookie is generated. Can be a wildcard, e.g. `https://some-cf-url.cloudfront.net/key/*`
+///
+/// # Examples
+/// ```
+/// use std::fs;
+/// use std::borrow::Cow;
+/// use cloudfront_sign::*;
+/// let private_key = fs::read_to_string("tests/data/private_key.pem").unwrap();
+/// let options = SignedOptions {
+///     key_pair_id: Cow::from("SOMEKEYPAIRID"),
+///     private_key: Cow::from(private_key),
+///     ..Default::default()
+/// };
+/// let signed_policy = get_signed_policy("https://example.com", &options).unwrap();
+pub fn get_signed_policy(
+    url: &str,
+    options: &SignedOptions
+) -> Result<SignedPolicy, EncodingError> {
+    let p0 = get_custom_policy(url, options);
+    let s0 = create_policy_signature(&p0, &options.private_key)?;
+
+    let p1 = STANDARD.encode(p0.as_bytes());
+    let policy = normalize_base64(&p1);
+    let signature = normalize_base64(&s0);
+    Ok(SignedPolicy {policy, signature})
+}
+
 /// Create a custom policy valid until a unix timestamp (s)
 /// https://docs.aws.amazon.com/AmazonCloudFront/latest/DeveloperGuide/private-content-setting-signed-cookie-custom-policy.html
 fn get_custom_policy(url: &str, options: &SignedOptions) -> String {
@@ -108,17 +145,15 @@ pub fn get_signed_cookie(
     options: &SignedOptions,
 ) -> Result<HashMap<String, String>, EncodingError> {
     let mut headers: HashMap<String, String> = HashMap::new();
-    let policy = get_custom_policy(url, options);
-    let signature = create_policy_signature(&policy, &options.private_key)?;
-    let policy_string = STANDARD.encode(policy.as_bytes());
+    let policy = get_signed_policy(url, options)?;
 
     headers.insert(
         String::from("CloudFront-Policy"),
-        normalize_base64(&policy_string).parse().unwrap(),
+        policy.policy.parse().unwrap(),
     );
     headers.insert(
         String::from("CloudFront-Signature"),
-        normalize_base64(&signature).parse().unwrap(),
+        policy.signature.parse().unwrap(),
     );
     headers.insert(
         String::from("CloudFront-Key-Pair-Id"),
@@ -168,22 +203,22 @@ fn normalize_base64(input: &str) -> String {
 /// };
 /// let signed_url = get_signed_url("https://example.com", &options).unwrap();
 /// ```
-pub fn get_signed_url(url: &str, options: &SignedOptions) -> Result<String, EncodingError> {
+pub fn get_signed_url(
+    url: &str,
+    options: &SignedOptions
+) -> Result<String, EncodingError> {
     let separator = if url.contains('?') { '&' } else { '?' };
     // policy is needed for signing but we do not have to include it into final url
-    let policy = get_custom_policy(url, options);
-    let signature = create_policy_signature(&policy, &options.private_key)?;
+    let policy = get_signed_policy(url, options)?;
 
     if options.date_greater_than.is_some() || options.ip_address.is_some() {
-        let policy_string = STANDARD.encode(policy.as_bytes());
-
         Ok(format!(
             "{}{}Expires={}&Policy={}&Signature={}&Key-Pair-Id={}",
             url,
             separator,
             options.date_less_than,
-            normalize_base64(&policy_string),
-            normalize_base64(&signature),
+            policy.policy,
+            policy.signature,
             options.key_pair_id
         ))
     } else {
@@ -192,7 +227,7 @@ pub fn get_signed_url(url: &str, options: &SignedOptions) -> Result<String, Enco
             url,
             separator,
             options.date_less_than,
-            normalize_base64(&signature),
+            policy.signature,
             options.key_pair_id
         ))
     }
